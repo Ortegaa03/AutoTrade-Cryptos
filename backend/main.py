@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,11 +15,21 @@ from sse_starlette.sse import EventSourceResponse
 DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 from .bot import bot
-from .config import CHAIN_ID, USDC_ADDRESS, WALLET, ZERO_X_API_KEY
+from .config import (
+    CHAIN_ID,
+    CRON_SECRET,
+    CYCLE_SECONDS,
+    OWNER_WALLET,
+    USDC_ADDRESS,
+    USE_CRON_CYCLES,
+    WALLET,
+    ZERO_X_API_KEY,
+)
 from .logger import logs
 from .ohlcv import fetch_ohlcv
 from .operations import estimate_profit, ops
 from .rpc_pool import rpc_pool
+from .supabase_store import store
 from .token_info import fetch_token_info
 from .wallet import WalletError, get_usdc_balance_human, require_credentials, wallet_usdc_snapshot
 
@@ -53,14 +63,14 @@ class CreateOpBody(BaseModel):
     sell_price_usd: float = Field(..., gt=0)
     usdc_amount: float = Field(..., gt=0)
     demo: bool = True
-    cycle_seconds: int = Field(default=600, ge=30)
+    cycle_seconds: int = Field(default=CYCLE_SECONDS, ge=30)
     start: bool = True
     mode: str = "classic"
     grid_count: int = Field(default=0, ge=0, le=200)
 
 
 class CycleConfigBody(BaseModel):
-    cycle_seconds: int = Field(..., ge=30)
+    cycle_seconds: int = Field(default=CYCLE_SECONDS, ge=30)
     cycle_minutes: Optional[float] = None
 
 
@@ -68,6 +78,14 @@ class EstimateBody(BaseModel):
     usdc_amount: float = Field(..., gt=0)
     buy_price_usd: float = Field(..., gt=0)
     sell_price_usd: float = Field(..., gt=0)
+
+
+def _authorize_cron(authorization: Optional[str]) -> None:
+    if not CRON_SECRET:
+        raise HTTPException(status_code=500, detail="CRON_SECRET no configurado")
+    expected = f"Bearer {CRON_SECRET}"
+    if (authorization or "").strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized cron")
 
 
 @app.get("/api/health")
@@ -79,8 +97,25 @@ async def health() -> dict[str, Any]:
         "has_api_key": bool(ZERO_X_API_KEY),
         "has_wallet": bool(WALLET),
         "operations": len(ops.list()),
+        "supabase": store.enabled,
+        "cron_cycles": USE_CRON_CYCLES,
+        "cycle_seconds": CYCLE_SECONDS,
+        "owner_wallet": OWNER_WALLET,
         "rpc": rpc_pool.status(),
     }
+
+
+@app.get("/api/cron/daily-cycles")
+async def cron_daily_cycles(
+    authorization: Optional[str] = Header(default=None),
+) -> dict[str, Any]:
+    """Vercel Cron (1×/día): un ciclo por cada operación status=running."""
+    _authorize_cron(authorization)
+    try:
+        summary = await ops.run_daily_cron()
+        return {"ok": True, **summary}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/wallet")
@@ -101,6 +136,8 @@ async def estimate(body: EstimateBody) -> dict[str, Any]:
 
 @app.get("/api/operations")
 async def list_operations() -> dict[str, Any]:
+    if store.enabled:
+        await ops.hydrate_from_supabase()
     await ops.ensure_all_running()
     return {"operations": ops.list()}
 

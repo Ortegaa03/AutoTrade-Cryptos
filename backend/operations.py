@@ -12,11 +12,14 @@ from typing import Any, Dict, List, Optional
 from .config import (
     CYCLE_SECONDS,
     OPERATIONS_FILE,
+    OWNER_WALLET,
     USDC_ADDRESS,
     USDC_DECIMALS,
+    USE_CRON_CYCLES,
 )
 from .grid import build_grid_levels, estimate_grid
 from .logger import logs
+from .supabase_store import store
 from .token_info import fetch_price_usd, fetch_token_info
 from .wallet import (
     WalletError,
@@ -194,7 +197,10 @@ class OperationRunner:
         return self._task is not None and not self._task.done()
 
     async def _spawn_loop(self) -> None:
-        """Una sola task por op — evita ciclos duplicados por race del watchdog."""
+        """Una sola task por op — solo en local sin Supabase/cron."""
+        if USE_CRON_CYCLES:
+            # En producción los ciclos los dispara /api/cron/daily-cycles
+            return
         async with self._spawn_lock:
             if self.op.status != OpStatus.RUNNING.value:
                 return
@@ -203,6 +209,8 @@ class OperationRunner:
             self._task = asyncio.create_task(self._loop(), name=f"op-{self.op.id[:8]}")
 
     async def ensure_running(self) -> None:
+        if USE_CRON_CYCLES:
+            return
         if self.op.status != OpStatus.RUNNING.value:
             return
         await self._spawn_loop()
@@ -226,45 +234,49 @@ class OperationRunner:
 
         already = self.op.status == OpStatus.RUNNING.value
         self.op.status = OpStatus.RUNNING.value
+        self.op.cycle_seconds = CYCLE_SECONDS
         self.op.error = None
         self.op.updated_at = datetime.now(timezone.utc).isoformat()
         if not already:
             reason = "reanudada" if prev in (OpStatus.PAUSED.value, OpStatus.STOPPED.value) else "iniciada"
+            cadence = "cron diario 24h" if USE_CRON_CYCLES else f"cada {CYCLE_SECONDS // 3600}h"
             add_event(
                 self.op,
                 kind="status",
                 title=f"Operación {reason}",
                 detail=(
                     f"Modo {'DEMO' if self.op.demo else 'LIVE'} · "
-                    f"ciclo {self.op.cycle_seconds}s ({max(1, self.op.cycle_seconds // 60)} min) · "
-                    f"fase {self.op.phase}"
+                    f"{cadence} · fase {self.op.phase}"
                 ),
             )
             await logs.emit(
                 f"[{self.op.token.get('symbol', 'OP')}] Operación {self.op.id[:8]} en curso "
-                f"({'DEMO' if self.op.demo else 'LIVE'}) · cada {max(1, self.op.cycle_seconds // 60)} min",
+                f"({'DEMO' if self.op.demo else 'LIVE'}) · {cadence}",
                 kind="ops",
                 level="success",
                 data={"id": self.op.id},
             )
         await self._spawn_loop()
         self.manager.save()
+        if store.enabled:
+            await self.manager.persist_one(self.op.id)
         return self.to_dict()
 
     async def set_cycle_seconds(self, cycle_seconds: int) -> Dict[str, Any]:
-        sec = max(30, int(cycle_seconds))
+        # Producto: ciclo bloqueado a 24h (cron Vercel)
+        sec = CYCLE_SECONDS
         prev = self.op.cycle_seconds
         self.op.cycle_seconds = sec
         self.op.updated_at = datetime.now(timezone.utc).isoformat()
         add_event(
             self.op,
             kind="status",
-            title="Ciclo actualizado",
-            detail=f"{prev}s → {sec}s ({max(1, sec // 60)} min)",
-            data={"from": prev, "to": sec},
+            title="Ciclo fijo 24h",
+            detail=f"Solicitado {cycle_seconds}s → forzado {sec}s (cron diario)",
+            data={"from": prev, "to": sec, "requested": cycle_seconds},
         )
         await logs.emit(
-            f"[{self.op.token.get('symbol', 'OP')}] Ciclo {prev}s → {sec}s",
+            f"[{self.op.token.get('symbol', 'OP')}] Ciclo fijo 24h (cron)",
             kind="ops",
             level="info",
             data={"id": self.op.id},
@@ -847,77 +859,132 @@ class OperationManager:
         self._load()
 
     def _load(self) -> None:
+        # Preferir Supabase si está configurado (async se hidrata en startup)
+        if USE_CRON_CYCLES:
+            return
         path = Path(OPERATIONS_FILE)
         if not path.exists():
             return
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             for item in raw.get("operations") or []:
-                fields = {
-                    "id",
-                    "token_address",
-                    "buy_price_usd",
-                    "sell_price_usd",
-                    "usdc_amount",
-                    "demo",
-                    "cycle_seconds",
-                    "status",
-                    "phase",
-                    "token",
-                    "last_price_usd",
-                    "bought_token_amount_raw",
-                    "buy_amount_out",
-                    "sell_amount_out",
-                    "buy_tx",
-                    "sell_tx",
-                    "demo_usdc_balance",
-                    "estimated",
-                    "realized_profit_usd",
-                    "realized_total_usd",
-                    "error",
-                    "created_at",
-                    "updated_at",
-                    "completed_at",
-                    "last_cycle_at",
-                    "events",
-                    "mode",
-                    "grid_count",
-                    "grid_levels",
-                }
-                data = {k: item[k] for k in fields if k in item}
-                data.setdefault("id", str(uuid.uuid4()))
-                data.setdefault("token_address", "")
-                data.setdefault("buy_price_usd", 0.0)
-                data.setdefault("sell_price_usd", 0.0)
-                data.setdefault("usdc_amount", 0.0)
-                was_running = data.get("status") == OpStatus.RUNNING.value
-                op = Operation(**data)
-                if was_running:
-                    op.status = OpStatus.PAUSED.value
-                    op.error = None
-                runner = OperationRunner(op, self)
-                runner._was_running = was_running  # type: ignore[attr-defined]
-                self._runners[op.id] = runner
+                self._ingest_op_dict(item, mark_was_running=True)
         except Exception:
             pass
 
+    def _ingest_op_dict(self, item: Dict[str, Any], *, mark_was_running: bool) -> None:
+        fields = {
+            "id",
+            "token_address",
+            "buy_price_usd",
+            "sell_price_usd",
+            "usdc_amount",
+            "demo",
+            "cycle_seconds",
+            "status",
+            "phase",
+            "token",
+            "last_price_usd",
+            "bought_token_amount_raw",
+            "buy_amount_out",
+            "sell_amount_out",
+            "buy_tx",
+            "sell_tx",
+            "demo_usdc_balance",
+            "estimated",
+            "realized_profit_usd",
+            "realized_total_usd",
+            "error",
+            "created_at",
+            "updated_at",
+            "completed_at",
+            "last_cycle_at",
+            "events",
+            "mode",
+            "grid_count",
+            "grid_levels",
+        }
+        data = {k: item[k] for k in fields if k in item}
+        data.setdefault("id", str(uuid.uuid4()))
+        data.setdefault("token_address", "")
+        data.setdefault("buy_price_usd", 0.0)
+        data.setdefault("sell_price_usd", 0.0)
+        data.setdefault("usdc_amount", 0.0)
+        data["cycle_seconds"] = CYCLE_SECONDS
+        was_running = data.get("status") == OpStatus.RUNNING.value
+        op = Operation(**data)
+        if mark_was_running and was_running and not USE_CRON_CYCLES:
+            op.status = OpStatus.PAUSED.value
+            op.error = None
+        runner = OperationRunner(op, self)
+        runner._was_running = bool(mark_was_running and was_running and not USE_CRON_CYCLES)  # type: ignore[attr-defined]
+        self._runners[op.id] = runner
+
+    async def hydrate_from_supabase(self) -> int:
+        if not store.enabled:
+            return 0
+        rows = await store.fetch_all_operations()
+        self._runners.clear()
+        for item in rows:
+            item["cycle_seconds"] = CYCLE_SECONDS
+            self._ingest_op_dict(item, mark_was_running=False)
+        return len(self._runners)
+
     def save(self) -> None:
+        # Backup local (opcional) + sync Supabase
         path = Path(OPERATIONS_FILE)
+        ops_out = []
+        for r in self._runners.values():
+            d = r.to_dict()
+            d.pop("running", None)
+            d.pop("task_alive", None)
+            d["cycle_seconds"] = CYCLE_SECONDS
+            d["owner_wallet"] = OWNER_WALLET
+            ops_out.append(d)
+        payload = {
+            "operations": ops_out,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            ops_out = []
-            for r in self._runners.values():
-                d = r.to_dict()
-                d.pop("running", None)
-                d.pop("task_alive", None)
-                ops_out.append(d)
-            payload = {
-                "operations": ops_out,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-            }
             path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError:
             pass
+
+        if store.enabled:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._persist_all_supabase(ops_out), name="supabase-persist")
+            except RuntimeError:
+                # sin event loop (raro): sync via asyncio.run
+                try:
+                    asyncio.run(self._persist_all_supabase(ops_out))
+                except Exception:
+                    pass
+
+    async def _persist_all_supabase(self, ops_out: List[Dict[str, Any]]) -> None:
+        for d in ops_out:
+            try:
+                await store.upsert_operation(d)
+            except Exception as exc:
+                await logs.emit(
+                    f"Supabase save falló {d.get('id', '')[:8]}: {exc}",
+                    kind="ops",
+                    level="warn",
+                )
+
+    async def persist_one(self, op_id: str) -> None:
+        if not store.enabled:
+            return
+        runner = self._runners.get(op_id)
+        if not runner:
+            return
+        d = runner.to_dict()
+        d.pop("running", None)
+        d.pop("task_alive", None)
+        d["cycle_seconds"] = CYCLE_SECONDS
+        d["owner_wallet"] = OWNER_WALLET
+        await store.upsert_operation(d)
 
     def list(self) -> List[Dict[str, Any]]:
         items = [r.to_dict() for r in self._runners.values()]
@@ -930,6 +997,8 @@ class OperationManager:
         return self._runners[op_id]
 
     async def ensure_all_running(self) -> None:
+        if USE_CRON_CYCLES:
+            return
         for runner in list(self._runners.values()):
             try:
                 await runner.ensure_running()
@@ -948,7 +1017,7 @@ class OperationManager:
         sell_price_usd: float,
         usdc_amount: float,
         demo: bool = True,
-        cycle_seconds: int = 600,
+        cycle_seconds: int = CYCLE_SECONDS,
         start: bool = False,
         mode: str = "classic",
         grid_count: int = 0,
@@ -965,6 +1034,8 @@ class OperationManager:
         levels: List[Dict[str, Any]] = []
         estimated: Dict[str, float]
         phase = Phase.WAITING_BUY.value
+        # Ciclo producto: siempre 24h
+        cycle_fixed = CYCLE_SECONDS
         if mode_norm == "grid":
             levels = build_grid_levels(
                 lower=float(buy_price_usd),
@@ -978,7 +1049,7 @@ class OperationManager:
                 float(buy_price_usd),
                 float(sell_price_usd),
                 gcount,
-                max(30, int(cycle_seconds)),
+                cycle_fixed,
             )
             phase = Phase.GRID.value
         else:
@@ -993,7 +1064,7 @@ class OperationManager:
             sell_price_usd=float(sell_price_usd),
             usdc_amount=float(usdc_amount),
             demo=demo,
-            cycle_seconds=max(30, int(cycle_seconds)),
+            cycle_seconds=cycle_fixed,
             status=OpStatus.DRAFT.value,
             phase=phase,
             token=info,
@@ -1012,15 +1083,14 @@ class OperationManager:
                 f"GRID continuo {info.get('symbol')} · {gcount} grinds · "
                 f"{len(levels)} buy levels · {usdc_amount} USDC · "
                 f"~{levels[0]['alloc_pct']:.1f}%/nivel · "
-                f"rango ${buy_price_usd}–${sell_price_usd} · sin stop en bounds"
+                f"rango ${buy_price_usd}–${sell_price_usd} · ciclo 24h cron"
             )
             title = "AutonomousTrade creado"
         else:
             detail = (
                 f"{info.get('symbol')} · invertir {usdc_amount} USDC · "
                 f"buy ≤ ${buy_price_usd} · sell ≥ ${sell_price_usd} · "
-                f"est. beneficio +${op.estimated.get('profit_usd', 0):.4f} "
-                f"(total ${op.estimated.get('total_usd', 0):.4f})"
+                f"est. beneficio +${op.estimated.get('profit_usd', 0):.4f} · ciclo 24h cron"
             )
             title = "Operación creada"
         add_event(
@@ -1031,6 +1101,8 @@ class OperationManager:
             data={"estimated": op.estimated, "mode": mode_norm, "grid_levels": levels},
         )
         self.save()
+        if store.enabled:
+            await self.persist_one(op.id)
         await logs.emit(
             f"Nueva op {op.id[:8]} · {title} · {info.get('symbol')}",
             kind="ops",
@@ -1046,9 +1118,28 @@ class OperationManager:
         await runner.stop()
         del self._runners[op_id]
         self.save()
+        if store.enabled:
+            try:
+                await store.delete_operation(op_id)
+            except Exception as exc:
+                await logs.emit(
+                    f"Supabase delete falló {op_id[:8]}: {exc}",
+                    kind="ops",
+                    level="warn",
+                )
+                raise
         await logs.emit(f"Operación eliminada {op_id[:8]}", kind="ops", level="warn")
 
     async def resume_interrupted(self) -> None:
+        if USE_CRON_CYCLES:
+            # Solo hidratar DB; el cron diario ejecuta ciclos
+            n = await self.hydrate_from_supabase()
+            await logs.emit(
+                f"Supabase: {n} operaciones cargadas (ciclos vía cron 24h)",
+                kind="system",
+                level="info",
+            )
+            return
         for runner in list(self._runners.values()):
             if getattr(runner, "_was_running", False):
                 try:
@@ -1059,8 +1150,68 @@ class OperationManager:
                         kind="ops",
                         level="warn",
                     )
-        # Por si quedaron running sin flag (reload parcial)
         await self.ensure_all_running()
+
+    async def run_daily_cron(self) -> Dict[str, Any]:
+        """Ejecuta un ciclo sobre todas las ops status=running (desde Supabase)."""
+        if store.enabled:
+            await self.hydrate_from_supabase()
+
+        run_id = await store.start_cron_run("daily-cycles") if store.enabled else ""
+        results: List[Dict[str, Any]] = []
+        succeeded = 0
+        failed = 0
+        runners = [
+            r
+            for r in self._runners.values()
+            if r.op.status == OpStatus.RUNNING.value
+        ]
+        for runner in runners:
+            item: Dict[str, Any] = {"id": runner.op.id, "symbol": runner.op.token.get("symbol")}
+            try:
+                await runner.run_cycle_now()
+                if store.enabled:
+                    await self.persist_one(runner.op.id)
+                item["ok"] = True
+                item["status"] = runner.op.status
+                item["phase"] = runner.op.phase
+                item["last_price_usd"] = runner.op.last_price_usd
+                succeeded += 1
+            except Exception as exc:
+                item["ok"] = False
+                item["error"] = str(exc)
+                failed += 1
+                try:
+                    self.save()
+                    if store.enabled:
+                        await self.persist_one(runner.op.id)
+                except Exception:
+                    pass
+            results.append(item)
+
+        summary = {
+            "processed": len(runners),
+            "succeeded": succeeded,
+            "failed": failed,
+            "results": results,
+            "cron_run_id": run_id,
+        }
+        if store.enabled and run_id:
+            await store.finish_cron_run(
+                run_id,
+                ok=failed == 0,
+                processed=len(runners),
+                succeeded=succeeded,
+                failed=failed,
+                details={"results": results},
+            )
+        await logs.emit(
+            f"Cron diario: {succeeded}/{len(runners)} ok · {failed} fallos",
+            kind="system",
+            level="success" if failed == 0 else "warn",
+            data=summary,
+        )
+        return summary
 
 
 ops = OperationManager()

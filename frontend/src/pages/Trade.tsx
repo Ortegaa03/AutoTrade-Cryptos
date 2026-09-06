@@ -341,7 +341,6 @@ export default function Trade() {
     setError(null);
     setBusy(true);
     try {
-      const minutes = Math.max(1, Number(cycleMinutes) || 10);
       const grinds = Math.max(2, Math.floor(Number(gridCount) || 10));
       const op = await api.createOp({
         token_address: tokenAddress.trim(),
@@ -349,7 +348,7 @@ export default function Trade() {
         sell_price_usd: Number(sellPrice),
         usdc_amount: Number(usdcAmount),
         demo,
-        cycle_seconds: Math.max(30, Math.round(minutes * 60)),
+        cycle_seconds: 86400,
         start: true,
         mode: isGrid ? "grid" : "classic",
         grid_count: isGrid ? grinds : 0,
@@ -437,7 +436,7 @@ export default function Trade() {
                   >
                     <span>
                       {op.token?.symbol || "OP"} · {op.status} ·{" "}
-                      {Math.max(1, Math.round((op.cycle_seconds || 600) / 60))}m
+                      24h
                     </span>
                     <span className="muted">cargar</span>
                   </button>
@@ -494,15 +493,11 @@ export default function Trade() {
             </div>
 
             <div className="field">
-              <label>Minutos por ciclo</label>
-              <input
-                type="number"
-                step="1"
-                min="1"
-                value={cycleMinutes}
-                onChange={(e) => setCycleMinutes(e.target.value)}
-                required
-              />
+              <label>Ciclo</label>
+              <input type="text" value="24 horas (cron diario)" disabled readOnly />
+              <p className="field-hint" style={{ marginTop: "0.35rem", opacity: 0.7, fontSize: "0.8rem" }}>
+                Las ops en curso se revisan 1× al día vía Vercel Cron + Supabase.
+              </p>
             </div>
 
             {isGrid && (

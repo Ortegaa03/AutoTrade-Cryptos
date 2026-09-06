@@ -45,7 +45,6 @@ export default function Operations() {
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
-  const [cycleEdit, setCycleEdit] = useState<Record<string, string>>({});
 
   async function refresh() {
     const data = await api.listOps();
@@ -171,43 +170,7 @@ export default function Operations() {
                 </div>
                 <div>
                   <span className="lbl">Ciclo</span>
-                  <div className="cycle-edit">
-                    <input
-                      type="number"
-                      min={1}
-                      step={1}
-                      value={
-                        cycleEdit[op.id] ??
-                        String(Math.max(1, Math.round((op.cycle_seconds || 600) / 60)))
-                      }
-                      onChange={(e) =>
-                        setCycleEdit((prev) => ({ ...prev, [op.id]: e.target.value }))
-                      }
-                      disabled={op.status === "completed" || busy === op.id}
-                    />
-                    <span>min</span>
-                    {op.status !== "completed" && (
-                      <button
-                        type="button"
-                        className="btn btn-ghost"
-                        disabled={busy === op.id}
-                        onClick={() => {
-                          const mins = Math.max(
-                            1,
-                            Number(
-                              cycleEdit[op.id] ??
-                                Math.max(1, Math.round((op.cycle_seconds || 600) / 60))
-                            ) || 10
-                          );
-                          void act(op.id, `Ciclo → ${mins} min`, () =>
-                            api.setCycleConfig(op.id, mins)
-                          );
-                        }}
-                      >
-                        Aplicar
-                      </button>
-                    )}
-                  </div>
+                  <strong>24h · cron diario</strong>
                 </div>
                 <div>
                   <span className="lbl">Último precio</span>

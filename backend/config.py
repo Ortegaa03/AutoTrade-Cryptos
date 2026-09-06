@@ -50,7 +50,19 @@ WORLDCHAIN_RPC_URLS = os.getenv("WORLDCHAIN_RPC_URLS", "").strip()
 
 ZERO_X_BASE = "https://api.0x.org"
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/{chain}/{address}"
-CYCLE_SECONDS = 10 * 60
+
+# Ciclo fijo 24h — el cron de Vercel ejecuta las ops en curso 1×/día
+CYCLE_SECONDS = 24 * 60 * 60
+CYCLE_MINUTES = 24 * 60
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+CRON_SECRET = os.getenv("CRON_SECRET", "").strip()
+OWNER_WALLET = (os.getenv("OWNER_WALLET") or WALLET or "default").strip().lower()
+
+# Si hay Supabase, los ciclos los dispara el cron (no loops eternos en serverless)
+USE_CRON_CYCLES = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
 STATE_FILE = DATA_DIR / "bot_state.json"
 OPERATIONS_FILE = DATA_DIR / "operations.json"
 

@@ -1,8 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/cron/daily-cycles",
+      "schedule": "0 8 * * *"
+    }
+  ],
   "functions": {
     "backend/main.py": {
-      "maxDuration": 60
+      "maxDuration": 300
     }
   }
 }
