@@ -1,0 +1,10 @@
+{
+  "name": "autotrade-cryptos",
+  "private": true,
+  "version": "0.2.0",
+  "scripts": {
+    "build:ui": "npm --prefix frontend run build",
+    "dev": "npm run build:ui && .venv\\Scripts\\python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000",
+    "start": "npm run build:ui && .venv\\Scripts\\python.exe -m uvicorn backend.main:app --host 127.0.0.1 --port 8000"
+  }
+}

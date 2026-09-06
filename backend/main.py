@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
+
+DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 from .bot import bot
 from .config import CHAIN_ID, USDC_ADDRESS, WALLET, ZERO_X_API_KEY
@@ -310,3 +315,23 @@ async def on_startup() -> None:
             await asyncio.sleep(15)
 
     asyncio.create_task(_watchdog(), name="ops-watchdog")
+
+
+# Single server: API (/api/*) + React SPA from frontend/dist on the same origin.
+if DIST_DIR.is_dir():
+    assets_dir = DIST_DIR / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+    @app.get("/")
+    async def spa_index() -> FileResponse:
+        return FileResponse(DIST_DIR / "index.html")
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str) -> FileResponse:
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="Not Found")
+        candidate = DIST_DIR / full_path
+        if candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(DIST_DIR / "index.html")
