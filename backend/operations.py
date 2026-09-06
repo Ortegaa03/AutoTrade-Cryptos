@@ -903,18 +903,21 @@ class OperationManager:
 
     def save(self) -> None:
         path = Path(OPERATIONS_FILE)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        ops_out = []
-        for r in self._runners.values():
-            d = r.to_dict()
-            d.pop("running", None)
-            d.pop("task_alive", None)
-            ops_out.append(d)
-        payload = {
-            "operations": ops_out,
-            "saved_at": datetime.now(timezone.utc).isoformat(),
-        }
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            ops_out = []
+            for r in self._runners.values():
+                d = r.to_dict()
+                d.pop("running", None)
+                d.pop("task_alive", None)
+                ops_out.append(d)
+            payload = {
+                "operations": ops_out,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+            }
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError:
+            pass
 
     def list(self) -> List[Dict[str, Any]]:
         items = [r.to_dict() for r in self._runners.values()]

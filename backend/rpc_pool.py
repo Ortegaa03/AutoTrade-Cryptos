@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
-from pathlib import Path
 from typing import List, Optional
 
 import httpx
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
-from .config import ROOT, WORLDCHAIN_RPC_URL
+from .config import DATA_DIR, WORLDCHAIN_RPC_URL
 
 # World Chain tiene pocas RPCs públicas free reales.
 # Arrancamos con las ya verificadas; el resto se prueban en background.
@@ -35,9 +35,13 @@ CANDIDATE_RPCS: List[str] = VERIFIED_RPCS + [
     "https://world-chain.drpc.org",
 ]
 
-POOL_FILE = ROOT / "data" / "rpc_pool.json"
+POOL_FILE = DATA_DIR / "rpc_pool.json"
 CHAIN_ID = 480
 CHAIN_ID_HEX = hex(CHAIN_ID)
+
+
+def _is_serverless() -> bool:
+    return bool(os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"))
 
 
 class RpcPool:
@@ -47,12 +51,11 @@ class RpcPool:
         self._index = 0
         self._last_probe = 0.0
         self._bootstrap()
-        # probe no bloqueante
-        threading.Thread(target=self._bg_probe, daemon=True).start()
+        # En serverless no probes de red en el import (evita cold-start timeout).
+        if not _is_serverless():
+            threading.Thread(target=self._bg_probe, daemon=True).start()
 
     def _extra_from_env(self) -> List[str]:
-        import os
-
         raw = os.getenv("WORLDCHAIN_RPC_URLS", "").strip()
         extras: List[str] = []
         if WORLDCHAIN_RPC_URL:
@@ -95,20 +98,16 @@ class RpcPool:
             return False
 
     def _bootstrap(self) -> None:
+        """Seed rápido sin probes de red (evita timeouts en Vercel cold start)."""
         extras = self._extra_from_env()
-        seed = []
+        seed: List[str] = []
         for u in extras + VERIFIED_RPCS:
             if u not in seed:
                 seed.append(u)
-        # quick check only first 3 to avoid startup hang
-        ok: List[str] = []
-        for u in seed[:5]:
-            if self._probe_one_http(u, timeout=2.5):
-                ok.append(u)
         with self._lock:
-            self._working = ok or list(VERIFIED_RPCS)
+            self._working = seed or list(VERIFIED_RPCS)
             self._index = 0
-            self._last_probe = time.time()
+            self._last_probe = 0.0
             self._save()
 
     def _bg_probe(self) -> None:
@@ -134,17 +133,20 @@ class RpcPool:
         return list(self._working)
 
     def _save(self) -> None:
-        POOL_FILE.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "working": self._working,
-            "candidates": self._all_candidates(),
-            "probed_at": time.time(),
-            "note": (
-                "World Chain solo expone pocas RPCs públicas free verificables. "
-                "Añade más en WORLDCHAIN_RPC_URLS (coma-separadas)."
-            ),
-        }
-        POOL_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        try:
+            POOL_FILE.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "working": self._working,
+                "candidates": self._all_candidates(),
+                "probed_at": time.time(),
+                "note": (
+                    "World Chain solo expone pocas RPCs públicas free verificables. "
+                    "Añade más en WORLDCHAIN_RPC_URLS (coma-separadas)."
+                ),
+            }
+            POOL_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError:
+            pass
 
     def current(self) -> str:
         with self._lock:

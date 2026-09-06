@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -8,6 +9,28 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parent.parent
 # utf-8-sig evita BOM de PowerShell que rompe nombres de variables
 load_dotenv(ROOT / ".env", encoding="utf-8-sig")
+
+
+def _resolve_data_dir() -> Path:
+    """En Vercel/Lambda el FS del proyecto es de solo lectura → usar /tmp."""
+    if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        path = Path(tempfile.gettempdir()) / "autotrade-cryptos"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    path = ROOT / "data"
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / ".write_ok"
+        probe.write_text("1", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return path
+    except OSError:
+        fallback = Path(tempfile.gettempdir()) / "autotrade-cryptos"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
+DATA_DIR = _resolve_data_dir()
 
 CHAIN_ID = 480
 CHAIN_NAME = "worldchain"
@@ -28,8 +51,8 @@ WORLDCHAIN_RPC_URLS = os.getenv("WORLDCHAIN_RPC_URLS", "").strip()
 ZERO_X_BASE = "https://api.0x.org"
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/{chain}/{address}"
 CYCLE_SECONDS = 10 * 60
-STATE_FILE = ROOT / "data" / "bot_state.json"
-OPERATIONS_FILE = ROOT / "data" / "operations.json"
+STATE_FILE = DATA_DIR / "bot_state.json"
+OPERATIONS_FILE = DATA_DIR / "operations.json"
 
 ERC20_ABI = [
     {

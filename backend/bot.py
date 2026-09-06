@@ -96,22 +96,25 @@ class TradingBot:
 
     def _save_state(self) -> None:
         path = Path(STATE_FILE)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "config": asdict(self.config),
-            "runtime": {
-                "phase": self.runtime.phase.value,
-                "demo": self.runtime.demo,
-                "token": self.runtime.token,
-                "last_price_usd": self.runtime.last_price_usd,
-                "last_cycle_at": self.runtime.last_cycle_at,
-                "bought_token_amount_raw": self.runtime.bought_token_amount_raw,
-                "buy_tx": self.runtime.buy_tx,
-                "sell_tx": self.runtime.sell_tx,
-                "demo_usdc_balance": self.runtime.demo_usdc_balance,
-            },
-        }
-        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "config": asdict(self.config),
+                "runtime": {
+                    "phase": self.runtime.phase.value,
+                    "demo": self.runtime.demo,
+                    "token": self.runtime.token,
+                    "last_price_usd": self.runtime.last_price_usd,
+                    "last_cycle_at": self.runtime.last_cycle_at,
+                    "bought_token_amount_raw": self.runtime.bought_token_amount_raw,
+                    "buy_tx": self.runtime.buy_tx,
+                    "sell_tx": self.runtime.sell_tx,
+                    "demo_usdc_balance": self.runtime.demo_usdc_balance,
+                },
+            }
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError:
+            pass
 
     def status(self) -> Dict[str, Any]:
         runtime = {

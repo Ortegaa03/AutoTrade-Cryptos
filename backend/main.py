@@ -299,12 +299,26 @@ async def stream_logs(history: int = 50) -> EventSourceResponse:
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    await logs.emit(
-        "AutoTrade listo · World Chain · multi-operaciones locales",
-        kind="system",
-        level="success",
-    )
-    await ops.resume_interrupted()
+    import os
+
+    try:
+        await logs.emit(
+            "AutoTrade listo · World Chain · multi-operaciones locales",
+            kind="system",
+            level="success",
+        )
+        await ops.resume_interrupted()
+    except Exception as exc:
+        # No tumbar la function en Vercel por fallos de persistencia
+        try:
+            await logs.emit(f"Startup parcial: {exc}", kind="system", level="warn")
+        except Exception:
+            pass
+        return
+
+    # En serverless el watchdog infinito no es fiable; en local sí.
+    if os.getenv("VERCEL") or os.getenv("AWS_LAMBDA_FUNCTION_NAME"):
+        return
 
     async def _watchdog() -> None:
         while True:

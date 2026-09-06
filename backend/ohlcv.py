@@ -8,11 +8,11 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import httpx
 
-from .config import ROOT
+from .config import DATA_DIR
 
 GECKO_BASE = "https://api.geckoterminal.com/api/v2"
 NETWORK = "world-chain"
-CACHE_DIR = ROOT / "data" / "ohlcv_cache"
+CACHE_DIR = DATA_DIR / "ohlcv_cache"
 CACHE_TTL_SEC = 10 * 60  # 10 minutos
 
 _MEM: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -36,13 +36,16 @@ def _read_disk(key: str) -> Optional[Dict[str, Any]]:
 
 
 def _write_disk(key: str, payload: Dict[str, Any]) -> None:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = _cache_path(key)
-    envelope = {
-        "saved_at": time.time(),
-        "payload": payload,
-    }
-    path.write_text(json.dumps(envelope), encoding="utf-8")
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _cache_path(key)
+        envelope = {
+            "saved_at": time.time(),
+            "payload": payload,
+        }
+        path.write_text(json.dumps(envelope), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _fresh_from_disk(key: str) -> Optional[Dict[str, Any]]:
