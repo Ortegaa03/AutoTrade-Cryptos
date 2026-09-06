@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { api, Operation } from "../api";
 
 const STATUS_LABEL: Record<string, string> = {
-  draft: "Borrador",
+  draft: "Preparada",
   running: "En curso",
   paused: "Pausa",
   completed: "Completada",

@@ -2,8 +2,13 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api, calcEstimate, Operation, TokenInfo } from "../api";
 import TradingChart, { Candle } from "../components/TradingChart";
-import { estimateGrid, gridLinePrices } from "../grid";
-import { isCacheFresh, readOhlcvCache, writeOhlcvCache } from "../ohlcvCache";
+import { estimateGrid, gridLinePrices, needsGridRecenter, suggestGridBounds } from "../grid";
+import {
+  isCacheFresh,
+  isMaxHistoryUsable,
+  readOhlcvCache,
+  writeOhlcvCache,
+} from "../ohlcvCache";
 import { readTradeDraft, writeTradeDraft } from "../tradeDraft";
 
 function formatUsd(n?: number | null) {
@@ -65,6 +70,7 @@ export default function Trade() {
   const [lastOpId, setLastOpId] = useState<string | null>(draft?.lastOpId || null);
   const [activeOps, setActiveOps] = useState<Operation[]>([]);
   const [hydrated, setHydrated] = useState(false);
+  const gridCenteredRef = useRef(false);
   const logEndRef = useRef<HTMLDivElement>(null);
   const focusOpIdRef = useRef<string | null>(draft?.lastOpId || null);
 
@@ -96,29 +102,39 @@ export default function Trade() {
 
   const chartGridPrices = useMemo(() => {
     if (!isGrid) return [];
-    return gridLinePrices(Number(buyPrice), Number(sellPrice), Number(gridCount) || 10);
+    const lower = Number(buyPrice);
+    const upper = Number(sellPrice);
+    const levels = Math.max(2, Math.floor(Number(gridCount) || 10));
+    if (!(upper > lower)) return [];
+    return gridLinePrices(lower, upper, levels);
   }, [isGrid, buyPrice, sellPrice, gridCount]);
 
   async function loadCandles(pair: string, tokenAddr: string) {
     setChartError(null);
-    const timeframe = "24h";
+    const timeframe = "max";
     const cached = readOhlcvCache(pair, tokenAddr, timeframe);
+    const cachedOk = cached && isMaxHistoryUsable(cached.candles);
 
-    if (isCacheFresh(cached) && cached) {
+    if (isCacheFresh(cached) && cachedOk && cached) {
       setCandles(cached.candles);
       return;
     }
 
-    if (cached?.candles?.length) {
+    if (cachedOk && cached) {
       setCandles(cached.candles);
     }
 
     try {
       const data = await api.ohlcv(pair, tokenAddr, timeframe);
+      if (!isMaxHistoryUsable(data.candles)) {
+        throw new Error(
+          `Historial incompleto (${data.candles?.length || 0} velas). Reintenta.`
+        );
+      }
       setCandles(data.candles);
       writeOhlcvCache(pair, tokenAddr, timeframe, data.candles, data.source);
     } catch (e) {
-      if (cached?.candles?.length) {
+      if (cachedOk && cached) {
         setCandles(cached.candles);
         setChartError(null);
       } else {
@@ -138,6 +154,11 @@ export default function Trade() {
         const running = list.filter((o) => o.status === "running" || o.status === "paused");
         setActiveOps(running);
 
+        if (lastOpId && !list.some((o) => o.id === lastOpId)) {
+          setLastOpId(null);
+          focusOpIdRef.current = null;
+        }
+
         const preferred =
           (lastOpId && list.find((o) => o.id === lastOpId)) ||
           running[0] ||
@@ -155,6 +176,7 @@ export default function Trade() {
           setGridCount(form.gridCount);
           setToken(form.token);
           setLastOpId(form.lastOpId);
+          gridCenteredRef.current = true;
           if (form.token?.pair_address && form.token.address) {
             void loadCandles(form.token.pair_address, form.token.address);
           }
@@ -190,7 +212,7 @@ export default function Trade() {
       sellPrice,
       usdcAmount,
       cycleMinutes,
-      tf: "24h",
+      tf: "max",
       lastOpId,
       token,
     });
@@ -231,6 +253,32 @@ export default function Trade() {
     setLogs([]);
   }, [lastOpId]);
 
+  useEffect(() => {
+    gridCenteredRef.current = false;
+  }, [isGrid, tokenAddress]);
+
+  // Recentrar BUY/SELL ±5% alrededor del spot si el rango está sesgado
+  useEffect(() => {
+    if (gridCenteredRef.current) return;
+    const spot =
+      (token?.price_usd && token.price_usd > 0 ? token.price_usd : null) ??
+      (candles.length && candles[candles.length - 1].close > 0
+        ? candles[candles.length - 1].close
+        : null);
+    if (!spot) return;
+    const buy = Number(buyPrice);
+    const sell = Number(sellPrice);
+    if (!needsGridRecenter(buy, sell, spot)) {
+      gridCenteredRef.current = true;
+      return;
+    }
+    const band = suggestGridBounds(spot, 0.05);
+    if (!band) return;
+    setBuyPrice(band.buy);
+    setSellPrice(band.sell);
+    gridCenteredRef.current = true;
+  }, [isGrid, token?.price_usd, candles, buyPrice, sellPrice]);
+
   async function refreshWallet() {
     try {
       setWalletBal(await api.wallet());
@@ -259,6 +307,7 @@ export default function Trade() {
     setGridCount(form.gridCount);
     setToken(form.token);
     setLastOpId(form.lastOpId);
+    gridCenteredRef.current = true;
     if (form.token?.pair_address && form.token.address) {
       void loadCandles(form.token.pair_address, form.token.address);
     }
@@ -270,10 +319,15 @@ export default function Trade() {
     try {
       const info = await api.resolveToken(tokenAddress.trim());
       setToken(info);
-      if (info.price_usd != null) {
-        const p = info.price_usd;
-        if (!buyPrice) setBuyPrice((p * 0.98).toPrecision(6));
-        if (!sellPrice) setSellPrice((p * 1.05).toPrecision(6));
+      // Nuevo token → siempre recentrar BUY/SELL y subniveles al precio actual
+      gridCenteredRef.current = false;
+      if (info.price_usd != null && info.price_usd > 0) {
+        const band = suggestGridBounds(info.price_usd, 0.05);
+        if (band) {
+          setBuyPrice(band.buy);
+          setSellPrice(band.sell);
+          gridCenteredRef.current = true;
+        }
       }
       if (info.pair_address) await loadCandles(info.pair_address, info.address);
     } catch (e) {
@@ -355,8 +409,8 @@ export default function Trade() {
                 <div className="wallet-label">Balance wallet</div>
                 <div className="wallet-addr">
                   {walletBal?.configured
-                    ? walletBal.wallet || "configurada"
-                    : "Sin WALLET en .env"}
+                    ? walletBal.wallet || "Conectada"
+                    : "—"}
                 </div>
               </div>
               <div className="wallet-bal">
@@ -453,7 +507,7 @@ export default function Trade() {
 
             {isGrid && (
               <div className="field">
-                <label>Grinds (niveles)</label>
+                <label>Niveles de grid</label>
                 <input
                   type="number"
                   step="1"
@@ -463,6 +517,28 @@ export default function Trade() {
                   onChange={(e) => setGridCount(e.target.value)}
                   required
                 />
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  style={{ marginTop: "0.45rem", width: "100%" }}
+                  onClick={() => {
+                    const spot =
+                      (token?.price_usd && token.price_usd > 0
+                        ? token.price_usd
+                        : null) ??
+                      (candles.length && candles[candles.length - 1].close > 0
+                        ? candles[candles.length - 1].close
+                        : null);
+                    if (!spot) return;
+                    const band = suggestGridBounds(spot, 0.05);
+                    if (!band) return;
+                    setBuyPrice(band.buy);
+                    setSellPrice(band.sell);
+                    gridCenteredRef.current = true;
+                  }}
+                >
+                  Centrar en precio actual
+                </button>
               </div>
             )}
 
@@ -534,7 +610,7 @@ export default function Trade() {
 
             <div className="action-block">
               <button type="submit" className="btn btn-primary grow" disabled={busy}>
-                Lanzar demo
+                Lanzar simulación
               </button>
               <button
                 type="button"
@@ -542,13 +618,13 @@ export default function Trade() {
                 disabled={busy}
                 onClick={() => void launch(false)}
               >
-                Lanzar live
+                Lanzar en vivo
               </button>
             </div>
 
-            {lastOpId && (
+            {lastOpId && activeOps.some((o) => o.id === lastOpId) && (
               <p className="hint-inline">
-                <Link to="/operations">Historial · {lastOpId.slice(0, 8)}</Link>
+                <Link to="/operations">Operación · {lastOpId.slice(0, 8)}</Link>
               </p>
             )}
             {error && <div className="err">{error}</div>}
@@ -558,6 +634,9 @@ export default function Trade() {
         <main className="main">
           <div className="chart-head">
             <h2>Chart</h2>
+            <span className="muted" style={{ fontSize: "0.75rem" }}>
+              Historial máximo disponible
+            </span>
           </div>
 
           <div className="chart-shell own">

@@ -18,7 +18,19 @@ export type CachedOhlcv = {
 };
 
 function key(pair: string, token: string, tf: string) {
-  return `ohlcv:${pair.toLowerCase()}:${token.toLowerCase()}:${tf}`;
+  // v3: invalida caches locales de ~24h que se guardaron como "max"
+  return `ohlcv:v3:${pair.toLowerCase()}:${token.toLowerCase()}:${tf}`;
+}
+
+/** Serie usable como historial máximo (no ~24h). */
+export function isMaxHistoryUsable(
+  candles: CachedOhlcv["candles"] | null | undefined
+): boolean {
+  if (!candles || candles.length < 40) return false;
+  const first = candles[0]?.time;
+  const last = candles[candles.length - 1]?.time;
+  if (!first || !last || last <= first) return false;
+  return (last - first) / 86400 >= 7;
 }
 
 export function readOhlcvCache(

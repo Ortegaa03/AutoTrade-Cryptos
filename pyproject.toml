@@ -1,0 +1,22 @@
+[project]
+name = "autotrade-cryptos"
+version = "0.2.0"
+description = "AutoTrade Cryptos — World Chain trading UI + FastAPI"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.34",
+  "httpx>=0.28",
+  "web3>=7.10",
+  "eth-account>=0.13",
+  "python-dotenv>=1.1",
+  "pydantic>=2.12",
+  "sse-starlette>=2.2",
+]
+
+[tool.vercel]
+entrypoint = "backend.main:app"
+
+# Build the React SPA into frontend/dist before the Python function is packaged.
+[tool.vercel.scripts]
+build = "npm --prefix frontend ci && npm --prefix frontend run build"

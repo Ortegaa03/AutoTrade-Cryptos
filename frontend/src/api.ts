@@ -121,9 +121,9 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token_address }),
     }).then((r) => parse<TokenInfo>(r)),
-  ohlcv: (pair_address: string, token_address: string, timeframe = "24h") =>
+  ohlcv: (pair_address: string, token_address: string, timeframe = "max") =>
     fetch(
-      `/api/ohlcv?pair_address=${encodeURIComponent(pair_address)}&token_address=${encodeURIComponent(token_address)}&timeframe=${encodeURIComponent(timeframe)}&limit=200`
+      `/api/ohlcv?pair_address=${encodeURIComponent(pair_address)}&token_address=${encodeURIComponent(token_address)}&timeframe=${encodeURIComponent(timeframe)}&limit=1000`
     ).then((r) =>
       parse<{
         candles: Array<{

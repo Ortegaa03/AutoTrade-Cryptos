@@ -105,94 +105,164 @@ async def resolve_pool_side(pair_address: str, token_address: str) -> Literal["b
     return "quote"
 
 
+def _candle_span_days(candles: List[Dict[str, Any]]) -> float:
+    if len(candles) < 2:
+        return 0.0
+    return (int(candles[-1]["time"]) - int(candles[0]["time"])) / 86400.0
+
+
+def _is_usable_max(candles: List[Dict[str, Any]]) -> bool:
+    """Rechaza series cortas (~24h) que no son historial máximo."""
+    if len(candles) < 40:
+        return False
+    return _candle_span_days(candles) >= 7.0
+
+
 async def fetch_ohlcv(
     *,
     pair_address: str,
     token_address: str,
-    timeframe: str = "24h",
-    limit: int = 200,
+    timeframe: str = "max",
+    limit: int = 1000,
 ) -> Dict[str, Any]:
     """
     OHLCV vía GeckoTerminal con cache local 10 min.
+    timeframe=max → velas diarias (todo el histórico del pool, 1 request).
     Si el fetch falla, devuelve cache caducado si existe.
     """
-    cache_key = f"{pair_address.lower()}:{token_address.lower()}:{timeframe}:{limit}"
+    tf = timeframe.lower().replace(" ", "")
+    # v3: max = day (invalida caches viejos de ~24h/hora)
+    cache_key = f"{pair_address.lower()}:{token_address.lower()}:{tf}:v3:{limit}"
+
+    def _accept_cached(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        candles = payload.get("candles")
+        if not isinstance(candles, list):
+            return None
+        if tf in ("max", "all", "full") and not _is_usable_max(candles):
+            return None
+        return payload
 
     mem = _MEM.get(cache_key)
     if mem and time.monotonic() - mem[0] < CACHE_TTL_SEC:
-        out = dict(mem[1])
-        out["cache"] = "memory"
-        out["cache_ttl_sec"] = CACHE_TTL_SEC
-        return out
+        accepted = _accept_cached(mem[1])
+        if accepted:
+            out = dict(accepted)
+            out["cache"] = "memory"
+            out["cache_ttl_sec"] = CACHE_TTL_SEC
+            return out
 
     disk_fresh = _fresh_from_disk(cache_key)
     if disk_fresh:
-        _MEM[cache_key] = (time.monotonic(), disk_fresh)
-        return disk_fresh
+        accepted = _accept_cached(disk_fresh)
+        if accepted:
+            _MEM[cache_key] = (time.monotonic(), accepted)
+            return accepted
 
     async with _LOCK:
         mem = _MEM.get(cache_key)
         if mem and time.monotonic() - mem[0] < CACHE_TTL_SEC:
-            out = dict(mem[1])
-            out["cache"] = "memory"
-            return out
+            accepted = _accept_cached(mem[1])
+            if accepted:
+                out = dict(accepted)
+                out["cache"] = "memory"
+                return out
         disk_fresh = _fresh_from_disk(cache_key)
         if disk_fresh:
-            _MEM[cache_key] = (time.monotonic(), disk_fresh)
-            return disk_fresh
+            accepted = _accept_cached(disk_fresh)
+            if accepted:
+                _MEM[cache_key] = (time.monotonic(), accepted)
+                return accepted
 
-        tf = timeframe.lower().replace(" ", "")
-        # Vistas UI: 24h / 7d / 31d
-        if tf in ("24h",):
+        # max = día completo del pool (hasta 1000 velas ≈ años de historia)
+        if tf in ("max", "all", "full"):
+            endpoint = "day"
+            aggregate = 1
+            page_limit = 1000
+            paginate = True
+        elif tf in ("24h",):
             endpoint = "hour"
             aggregate = 1
-            limit = min(max(limit, 24), 48)
+            page_limit = min(max(limit, 24), 168)
+            paginate = False
         elif tf in ("7d", "7day", "week"):
             endpoint = "hour"
             aggregate = 4
-            limit = min(max(limit, 42), 168)
+            page_limit = min(max(limit, 42), 1000)
+            paginate = False
         elif tf in ("31d", "30d", "month"):
             endpoint = "day"
             aggregate = 1
-            limit = min(max(limit, 31), 60)
+            page_limit = min(max(limit, 31), 365)
+            paginate = False
         elif tf in ("1m", "5m", "15m"):
             endpoint = "minute"
             aggregate = {"1m": 1, "5m": 5, "15m": 15}[tf]
+            page_limit = min(max(limit, 100), 1000)
+            paginate = False
         elif tf in ("1h", "4h"):
             endpoint = "hour"
             aggregate = {"1h": 1, "4h": 4}[tf]
+            page_limit = min(max(limit, 100), 1000)
+            paginate = False
         elif tf in ("1d", "d", "day"):
             endpoint = "day"
             aggregate = 1
+            page_limit = min(max(limit, 100), 1000)
+            paginate = False
         else:
-            endpoint = "hour"
+            endpoint = "day"
             aggregate = 1
-            limit = 24
+            page_limit = 1000
+            paginate = True
 
         try:
             side = await resolve_pool_side(pair_address, token_address)
             url = f"{GECKO_BASE}/networks/{NETWORK}/pools/{pair_address}/ohlcv/{endpoint}"
-            params = {
-                "aggregate": aggregate,
-                "limit": min(limit, 1000),
-                "currency": "usd",
-                "token": side,
-            }
-            async with httpx.AsyncClient(timeout=30.0, headers={"Accept": "application/json"}) as client:
-                raw = await _get_json(client, url, params)
+            all_rows: List[List[float]] = []
+            before_ts: Optional[int] = None
+            max_pages = 3 if paginate else 1
 
-            rows: List[List[float]] = (
-                ((raw.get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
-            )
-            candles = []
-            for row in reversed(rows):
+            async with httpx.AsyncClient(timeout=45.0, headers={"Accept": "application/json"}) as client:
+                for page_i in range(max_pages):
+                    params: Dict[str, Any] = {
+                        "aggregate": aggregate,
+                        "limit": page_limit,
+                        "currency": "usd",
+                        "token": side,
+                    }
+                    if before_ts is not None:
+                        params["before_timestamp"] = before_ts
+                    raw = await _get_json(client, url, params)
+                    rows: List[List[float]] = (
+                        ((raw.get("data") or {}).get("attributes") or {}).get("ohlcv_list") or []
+                    )
+                    if not rows:
+                        break
+                    all_rows.extend(rows)
+                    oldest = min(int(r[0]) for r in rows if r and len(r) > 0)
+                    if before_ts is not None and oldest >= before_ts:
+                        break
+                    before_ts = oldest
+                    if not paginate or len(rows) < page_limit:
+                        break
+                    if page_i + 1 < max_pages:
+                        await asyncio.sleep(1.2)
+
+            # Deduplicar por timestamp y ordenar asc
+            by_ts: Dict[int, List[float]] = {}
+            for row in all_rows:
                 if not row or len(row) < 5:
                     continue
-                ts, o, h, l, c = row[0], row[1], row[2], row[3], row[4]
+                by_ts[int(row[0])] = row
+
+            candles = []
+            for ts in sorted(by_ts.keys()):
+                row = by_ts[ts]
+                o, h, l, c = row[1], row[2], row[3], row[4]
                 vol = row[5] if len(row) > 5 else 0
                 candles.append(
                     {
-                        "time": int(ts),
+                        "time": ts,
                         "open": float(o),
                         "high": float(h),
                         "low": float(l),
@@ -206,18 +276,25 @@ async def fetch_ohlcv(
                 "token_address": token_address,
                 "network": NETWORK,
                 "timeframe": timeframe,
+                "resolution": endpoint,
                 "side": side,
                 "source": "geckoterminal",
                 "candles": candles,
+                "span_days": round(_candle_span_days(candles), 2),
                 "cache": "miss",
                 "cache_ttl_sec": CACHE_TTL_SEC,
             }
+            if tf in ("max", "all", "full") and not _is_usable_max(candles):
+                raise RuntimeError(
+                    f"OHLCV max demasiado corto ({len(candles)} velas, "
+                    f"{payload['span_days']}d) — se esperaba historial diario"
+                )
             _MEM[cache_key] = (time.monotonic(), payload)
             _write_disk(cache_key, payload)
             return payload
         except Exception as exc:
             stale = _stale_from_disk(cache_key)
-            if stale:
+            if stale and _accept_cached(stale):
                 stale["cache_error"] = str(exc)
                 return stale
             raise

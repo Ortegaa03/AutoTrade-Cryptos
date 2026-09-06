@@ -9,6 +9,40 @@ export type GridLevelPreview = {
   side: "buy";
 };
 
+/** Symmetric buy/sell band around spot for grid defaults (±pct). */
+export function suggestGridBounds(
+  spot: number,
+  pct = 0.05,
+): { buy: string; sell: string } | null {
+  if (!(spot > 0) || !(pct > 0 && pct < 1)) return null;
+  const buy = spot * (1 - pct);
+  const sell = spot * (1 + pct);
+  const digits = spot >= 1 ? 6 : spot >= 0.01 ? 8 : 10;
+  return {
+    buy: buy.toPrecision(digits),
+    sell: sell.toPrecision(digits),
+  };
+}
+
+/** True when bounds are missing, inverted, or badly skewed vs spot. */
+export function needsGridRecenter(
+  buy: number,
+  sell: number,
+  spot: number | null | undefined,
+): boolean {
+  if (!(buy > 0) || !(sell > 0) || !(sell > buy)) return true;
+  if (!(spot && spot > 0)) return false;
+  if (buy >= spot || sell <= spot) return true;
+  const below = (spot - buy) / spot;
+  const above = (sell - spot) / spot;
+  // One side more than 3× the other → chart piles levels on the fat side
+  if (below < 0.005 || above < 0.005) return true;
+  if (above / Math.max(below, 1e-9) > 3 || below / Math.max(above, 1e-9) > 3) {
+    return true;
+  }
+  return false;
+}
+
 export function gridLinePrices(lower: number, upper: number, gridCount: number): number[] {
   if (!(upper > lower) || gridCount < 2) return [];
   const n = Math.max(2, Math.floor(gridCount));

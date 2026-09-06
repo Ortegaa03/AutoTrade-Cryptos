@@ -1,13 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import { readTradeDraft } from "../tradeDraft";
 
 export default function Menu() {
   const [running, setRunning] = useState(0);
   const [total, setTotal] = useState(0);
-  const draft = readTradeDraft();
-  const draftLabel = draft?.token?.symbol || (draft?.tokenAddress ? "borrador" : null);
 
   useEffect(() => {
     let alive = true;
@@ -33,7 +30,7 @@ export default function Menu() {
   return (
     <div className="menu-page">
       <div className="menu-hero">
-        <p className="menu-kicker">World Chain · local</p>
+        <p className="menu-kicker">World Chain</p>
         <h1 className="brand">
           AutoTrade <span>Cryptos</span>
         </h1>
@@ -41,9 +38,8 @@ export default function Menu() {
           {running > 0
             ? `${running} en curso · ${total} en historial`
             : total > 0
-              ? `${total} ops en historial · ninguna en curso`
-              : "Elige dónde quieres ir"}
-          {draftLabel ? ` · borrador: ${draftLabel}` : ""}
+              ? `${total} operaciones en historial`
+              : "Elige el modo de ejecución"}
         </p>
       </div>
 
@@ -51,24 +47,20 @@ export default function Menu() {
         <Link to="/trade" className="menu-card">
           <span className="menu-n">01</span>
           <h2>AutoTrade</h2>
-          <p>
-            {draftLabel
-              ? `Retoma ${draftLabel} · buy/sell simple.`
-              : "Compra ≤ X, vende ≥ Y. Una operación clásica."}
-          </p>
+          <p>Compra y venta por niveles de precio. Una operación clásica.</p>
         </Link>
         <Link to="/trade?mode=grid" className="menu-card">
           <span className="menu-n">02</span>
           <h2>AutonomousTrade</h2>
-          <p>Grid / grinds en el rango buy–sell. Reparte la inversión por niveles.</p>
+          <p>Grid en el rango buy–sell. Reparte la inversión por niveles.</p>
         </Link>
         <Link to="/operations" className="menu-card">
           <span className="menu-n">03</span>
           <h2>Historial</h2>
           <p>
             {running > 0
-              ? `${running} activas ahora. Pausar, ciclo o eliminar.`
-              : "En curso, pausadas, grid y completadas."}
+              ? `${running} activas. Pausar, ciclo o eliminar.`
+              : "Operaciones en curso, en pausa y completadas."}
           </p>
         </Link>
       </div>

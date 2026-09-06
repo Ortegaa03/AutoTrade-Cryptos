@@ -261,8 +261,8 @@ async def cycle_now() -> dict[str, Any]:
 async def ohlcv(
     pair_address: str,
     token_address: str,
-    timeframe: str = "15m",
-    limit: int = 200,
+    timeframe: str = "max",
+    limit: int = 1000,
 ) -> dict[str, Any]:
     try:
         return await fetch_ohlcv(
