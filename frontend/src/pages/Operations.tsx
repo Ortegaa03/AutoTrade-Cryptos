@@ -170,7 +170,7 @@ export default function Operations() {
                 </div>
                 <div>
                   <span className="lbl">Ciclo</span>
-                  <strong>24h · cron diario</strong>
+                  <strong>24 horas</strong>
                 </div>
                 <div>
                   <span className="lbl">Último precio</span>

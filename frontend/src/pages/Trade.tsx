@@ -494,10 +494,7 @@ export default function Trade() {
 
             <div className="field">
               <label>Ciclo</label>
-              <input type="text" value="24 horas (cron diario)" disabled readOnly />
-              <p className="field-hint" style={{ marginTop: "0.35rem", opacity: 0.7, fontSize: "0.8rem" }}>
-                Las ops en curso se revisan 1× al día vía Vercel Cron + Supabase.
-              </p>
+              <input type="text" value="24 horas" disabled readOnly />
             </div>
 
             {isGrid && (
